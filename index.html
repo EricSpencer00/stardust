@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stardust — Interactive Cosmic Particles</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;overflow:hidden;font-family:'Helvetica Neue',system-ui,sans-serif;cursor:crosshair;user-select:none}
+  canvas{display:block;position:fixed;top:0;left:0}
+  #ui{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10;opacity:0;transition:opacity .6s;pointer-events:none}
+  body:hover #ui,body:focus-within #ui{opacity:1;pointer-events:auto}
+  .btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:rgba(255,255,255,.7);padding:8px 16px;border-radius:20px;font-size:12px;letter-spacing:.5px;cursor:pointer;transition:all .3s;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+  .btn:hover{background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3)}
+  .btn.active{background:rgba(255,255,255,.2);color:#fff;border-color:rgba(255,255,255,.4)}
+  #info{position:fixed;top:24px;left:50%;transform:translateX(-50%);color:rgba(255,255,255,.4);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;z-index:10;opacity:0;animation:fadeIn 2s 1s forwards;text-align:center;pointer-events:none}
+  #title{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;text-align:center;pointer-events:none;opacity:0;animation:titleIn 3s .2s forwards}
+  #title h1{color:rgba(255,255,255,.9);font-size:clamp(36px,8vw,72px);font-weight:200;letter-spacing:12px;text-transform:uppercase;margin-bottom:8px}
+  #title p{color:rgba(255,255,255,.35);font-size:13px;letter-spacing:3px}
+  @keyframes fadeIn{to{opacity:1}}
+  @keyframes titleIn{0%{opacity:0;transform:translate(-50%,-50%) scale(.95)}40%{opacity:1;transform:translate(-50%,-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1);pointer-events:none}}
+  #fps{position:fixed;top:24px;right:24px;color:rgba(255,255,255,.2);font-size:10px;z-index:10;font-family:monospace;display:none}
+</style>
+</head>
+<body>
+<div id="title"><h1>Stardust</h1><p>move your cursor to shape the cosmos</p></div>
+<div id="info">click to attract &middot; shift+click to repel &middot; scroll to resize &middot; 1-5 themes</div>
+<div id="ui">
+  <button class="btn active" data-theme="0">Nebula</button>
+  <button class="btn" data-theme="1">Aurora</button>
+  <button class="btn" data-theme="2">Ocean</button>
+  <button class="btn" data-theme="3">Ember</button>
+  <button class="btn" data-theme="4">Void</button>
+  <button class="btn" data-mode="burst">Burst</button>
+  <button class="btn" data-mode="clear">Clear</button>
+</div>
+<div id="fps"></div>
+<canvas id="c"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const THEMES = [
+  { name:'Nebula',  bg:'#05010d', colors:['#a855f7','#6366f1','#ec4899','#8b5cf6','#c084fc','#f472b6','#818cf8'] },
+  { name:'Aurora',  bg:'#010d05', colors:['#22d3ee','#34d399','#4ade80','#2dd4bf','#a3e635','#67e8f9','#86efac'] },
+  { name:'Ocean',   bg:'#010810', colors:['#0ea5e9','#06b6d4','#3b82f6','#0284c7','#38bdf8','#7dd3fc','#2563eb'] },
+  { name:'Ember',   bg:'#100501', colors:['#f97316','#ef4444','#eab308','#f59e0b','#fb923c','#fbbf24','#dc2626'] },
+  { name:'Void',    bg:'#080808', colors:['#e2e8f0','#94a3b8','#cbd5e1','#f1f5f9','#64748b','#d4d4d8','#a1a1aa'] },
+];
+
+let W, H, dpr;
+let particles = [];
+let wells = [];
+let mouse = { x: -1000, y: -1000, down: false, repel: false };
+let currentTheme = 0;
+let trailAlpha = 0.06;
+let particleCount = 0;
+const MAX_PARTICLES = 2500;
+const SPAWN_RATE = 8;
+let time = 0;
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+class Particle {
+  constructor(x, y, vx, vy) {
+    this.x = x ?? Math.random() * W;
+    this.y = y ?? Math.random() * H;
+    this.vx = vx ?? (Math.random() - 0.5) * 1.5;
+    this.vy = vy ?? (Math.random() - 0.5) * 1.5;
+    this.life = 1;
+    this.maxLife = 400 + Math.random() * 600;
+    this.age = 0;
+    this.size = 1 + Math.random() * 2.5;
+    this.colorIdx = Math.floor(Math.random() * THEMES[currentTheme].colors.length);
+    this.trail = [];
+    this.trailMax = 8 + Math.floor(Math.random() * 12);
+    this.mass = 0.5 + Math.random() * 1.5;
+  }
+
+  update(dt) {
+    this.age += dt;
+    this.life = Math.max(0, 1 - this.age / this.maxLife);
+    if (this.life <= 0) return false;
+
+    let fx = 0, fy = 0;
+
+    // mouse gravity
+    const mdx = mouse.x - this.x;
+    const mdy = mouse.y - this.y;
+    const mDist = Math.sqrt(mdx * mdx + mdy * mdy) + 1;
+    if (mDist < 300) {
+      const force = (mouse.down ? 800 : 120) / (mDist * mDist) * this.mass;
+      const dir = mouse.repel ? -1 : 1;
+      fx += mdx / mDist * force * dir;
+      fy += mdy / mDist * force * dir;
+    }
+
+    // gravity wells
+    for (let i = wells.length - 1; i >= 0; i--) {
+      const w = wells[i];
+      const wdx = w.x - this.x;
+      const wdy = w.y - this.y;
+      const wDist = Math.sqrt(wdx * wdx + wdy * wdy) + 1;
+      if (wDist < 400) {
+        const wf = w.strength / (wDist * wDist) * this.mass;
+        fx += wdx / wDist * wf;
+        fy += wdy / wDist * wf;
+      }
+    }
+
+    // gentle orbital drift
+    fx += Math.sin(time * 0.001 + this.y * 0.005) * 0.02;
+    fy += Math.cos(time * 0.001 + this.x * 0.005) * 0.02;
+
+    this.vx += fx * dt;
+    this.vy += fy * dt;
+
+    // damping
+    this.vx *= 0.995;
+    this.vy *= 0.995;
+
+    // speed limit
+    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+    if (speed > 8) {
+      this.vx = this.vx / speed * 8;
+      this.vy = this.vy / speed * 8;
+    }
+
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    // wrap
+    if (this.x < -50) this.x = W + 50;
+    if (this.x > W + 50) this.x = -50;
+    if (this.y < -50) this.y = H + 50;
+    if (this.y > H + 50) this.y = -50;
+
+    // trail
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > this.trailMax) this.trail.shift();
+
+    return true;
+  }
+
+  draw() {
+    const theme = THEMES[currentTheme];
+    const color = theme.colors[this.colorIdx % theme.colors.length];
+    const alpha = this.life * 0.8;
+
+    // trail
+    if (this.trail.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(this.trail[0].x, this.trail[0].y);
+      for (let i = 1; i < this.trail.length; i++) {
+        ctx.lineTo(this.trail[i].x, this.trail[i].y);
+      }
+      ctx.strokeStyle = color + hex(alpha * 0.3);
+      ctx.lineWidth = this.size * 0.5 * this.life;
+      ctx.stroke();
+    }
+
+    // glow
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * 3 * this.life, 0, Math.PI * 2);
+    ctx.fillStyle = color + hex(alpha * 0.08);
+    ctx.fill();
+
+    // core
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * this.life, 0, Math.PI * 2);
+    ctx.fillStyle = color + hex(alpha);
+    ctx.fill();
+  }
+}
+
+function hex(a) {
+  return Math.round(Math.max(0, Math.min(1, a)) * 255).toString(16).padStart(2, '0');
+}
+
+function spawnParticles(count, x, y, spread, speed) {
+  for (let i = 0; i < count && particles.length < MAX_PARTICLES; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * (spread || 100);
+    const s = speed || 2;
+    particles.push(new Particle(
+      (x ?? W / 2) + Math.cos(angle) * r,
+      (y ?? H / 2) + Math.sin(angle) * r,
+      Math.cos(angle) * (Math.random() * s - s / 2),
+      Math.sin(angle) * (Math.random() * s - s / 2)
+    ));
+  }
+}
+
+function burst(x, y) {
+  for (let i = 0; i < 80 && particles.length < MAX_PARTICLES; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 4;
+    particles.push(new Particle(x, y, Math.cos(angle) * speed, Math.sin(angle) * speed));
+  }
+}
+
+// continuous ambient spawn
+function ambientSpawn() {
+  if (particles.length < MAX_PARTICLES) {
+    for (let i = 0; i < SPAWN_RATE; i++) {
+      const edge = Math.floor(Math.random() * 4);
+      let x, y;
+      switch (edge) {
+        case 0: x = Math.random() * W; y = -20; break;
+        case 1: x = W + 20; y = Math.random() * H; break;
+        case 2: x = Math.random() * W; y = H + 20; break;
+        case 3: x = -20; y = Math.random() * H; break;
+      }
+      particles.push(new Particle(x, y));
+    }
+  }
+}
+
+let lastTime = performance.now();
+let fpsFrames = 0;
+let fpsTime = 0;
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  const rawDt = (now - lastTime) / 16.667;
+  const dt = Math.min(rawDt, 3);
+  lastTime = now;
+  time = now;
+
+  // fps
+  fpsFrames++;
+  fpsTime += now - (lastTime - rawDt * 16.667);
+
+  // background fade
+  const theme = THEMES[currentTheme];
+  ctx.fillStyle = theme.bg + hex(trailAlpha);
+  ctx.fillRect(0, 0, W, H);
+
+  // update wells
+  for (let i = wells.length - 1; i >= 0; i--) {
+    wells[i].life -= 0.002 * dt;
+    wells[i].strength = wells[i].baseStrength * wells[i].life;
+    if (wells[i].life <= 0) wells.splice(i, 1);
+  }
+
+  // draw wells
+  for (const w of wells) {
+    const r = 30 * w.life;
+    ctx.beginPath();
+    ctx.arc(w.x, w.y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = (w.baseStrength > 0 ? 'rgba(255,255,255,' : 'rgba(255,100,100,') + (w.life * 0.3) + ')';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // ambient spawn
+  ambientSpawn();
+
+  // update + draw particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    if (!particles[i].update(dt)) {
+      particles.splice(i, 1);
+    }
+  }
+  for (const p of particles) {
+    p.draw();
+  }
+
+  // connection lines between nearby particles
+  const connDist = 80;
+  const connDistSq = connDist * connDist;
+  const len = particles.length;
+  if (len < 800) {
+    ctx.lineWidth = 0.3;
+    for (let i = 0; i < len; i++) {
+      const a = particles[i];
+      for (let j = i + 1; j < len; j++) {
+        const b = particles[j];
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < connDistSq) {
+          const alpha = (1 - distSq / connDistSq) * a.life * b.life * 0.15;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = theme.colors[a.colorIdx % theme.colors.length] + hex(alpha);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  // particle count display (debug)
+  particleCount = particles.length;
+}
+
+// input
+canvas.addEventListener('mousemove', e => {
+  mouse.x = e.clientX;
+  mouse.y = e.clientY;
+});
+
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  mouse.repel = e.shiftKey;
+});
+
+canvas.addEventListener('mouseup', () => {
+  mouse.down = false;
+  // create gravity well
+  wells.push({
+    x: mouse.x, y: mouse.y,
+    baseStrength: mouse.repel ? -600 : 600,
+    strength: mouse.repel ? -600 : 600,
+    life: 1
+  });
+  burst(mouse.x, mouse.y);
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  mouse.x = t.clientX;
+  mouse.y = t.clientY;
+  mouse.down = true;
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  mouse.x = t.clientX;
+  mouse.y = t.clientY;
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  mouse.down = false;
+  burst(mouse.x, mouse.y);
+  wells.push({ x: mouse.x, y: mouse.y, baseStrength: 600, strength: 600, life: 1 });
+});
+
+window.addEventListener('wheel', e => {
+  trailAlpha = Math.max(0.01, Math.min(0.2, trailAlpha + e.deltaY * 0.0005));
+});
+
+// keyboard
+window.addEventListener('keydown', e => {
+  const num = parseInt(e.key);
+  if (num >= 1 && num <= 5) {
+    currentTheme = num - 1;
+    updateButtons();
+    // flash bg
+    ctx.fillStyle = THEMES[currentTheme].bg;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (e.key === ' ') {
+    e.preventDefault();
+    burst(W / 2, H / 2);
+  }
+});
+
+// buttons
+document.querySelectorAll('[data-theme]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    currentTheme = parseInt(btn.dataset.theme);
+    updateButtons();
+    ctx.fillStyle = THEMES[currentTheme].bg;
+    ctx.fillRect(0, 0, W, H);
+  });
+});
+
+document.querySelectorAll('[data-mode]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.mode === 'burst') burst(W / 2, H / 2);
+    if (btn.dataset.mode === 'clear') {
+      particles = [];
+      wells = [];
+      ctx.fillStyle = THEMES[currentTheme].bg;
+      ctx.fillRect(0, 0, W, H);
+    }
+  });
+});
+
+function updateButtons() {
+  document.querySelectorAll('[data-theme]').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.theme) === currentTheme);
+  });
+}
+
+// init
+resize();
+window.addEventListener('resize', resize);
+
+// initial particles
+spawnParticles(400, W / 2, H / 2, Math.min(W, H) * 0.3, 1.5);
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
